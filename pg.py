@@ -5,8 +5,9 @@ import cPickle as pickle
 import gym
 import keras
 from keras.models import Sequential, Model
-from keras.layers import Dense, Input, Dropout
+from keras.layers import Dense, Input, Dropout, Reshape, TimeDistributed, Convolution2D
 from keras.optimizers import RMSprop
+import matplotlib.pyplot as plt
 
 
 H = 200 # number of hidden layer neurons
@@ -17,17 +18,37 @@ decay_rate = 0.99 # decay factor for RMSProp leaky sum of grad^2
 resume = True # resume from previous checkpoint?
 render = False
 train_eps = 10
-D = 80 * 80
+D = [1, 1, 80, 80]
+
+# env settings
+env = gym.make("Pong-v0")
+observation = env.reset()
+prev_x = None # used in computing the difference frame
+xs, dlogps, drs = [], [], []
+running_reward = None
+reward_sum = 0
+episode_number = 0
+nframes = 1
 
 
-
-def karpathy_simple_pgnet(input_dim, learning_rate=1e-4, **args):
-    S = Input(shape=[input_dim])
+def karpathy_simple_pgnet(env, dropout=0.5, learning_rate=1e-4, **args):
+    S = Input(shape=[agent.input_dim])
     h = Dense(200, activation='relu', init='he_normal')(S)
-    V = Dense(1, activation='sigmoid')(h)
+    h = Dropout(dropout)(h)
+    V = Dense(env.action_space.n, activation='sigmoid',init='zero')(h)
     model = Model(S,V)
     model.compile(loss='mse', optimizer=RMSprop(lr=learning_rate) )
     return model
+
+
+# if resume:
+#     model = karpathy_simple_pgnet(D)
+#     model.load_weights('test.h5')
+#
+# else:
+#     model = karpathy_simple_pgnet(D)
+
+model = pgconvnet(env, D)
 
 def prepro(I):
     """
@@ -38,7 +59,7 @@ def prepro(I):
     I[I == 144] = 0 # erase background (bg type 1)
     I[I == 109] = 0 # erase background (bg type 2)
     I[I != 0] = 1 # set everything else (ball, paddles) to 1
-    return I.astype(np.float).ravel()
+    return I.astype(np.float)
 
 def discount_rewards(r):
     """
@@ -71,25 +92,26 @@ while True:
     prev_x = cur_x
 
     aprob = np.squeeze(model.predict(x.reshape(1, D))).flatten()
-    action = 2 if np.random.uniform() < aprob else 3 # roll the dice!
-
+    action = np.random.choice( env.action_space.n, 1, p=aprob/np.sum(aprob) )[0]
     xs.append(x) # keep track of all our states
 
-    y = 1 if action == 2 else 0 # a "fake label"
-    dlogps.append(y - aprob) 
+    y = np.zeros([env.action_space.n])
+    y[action] = 1
 
     dlogps.append(y) # grad that encourages the action that was tak
 
 
     # step env and get new measurements
     observation, reward, done, info = env.step(action)
-    reward_sum += reward
+    reward_sum += float(reward)
 
-    drs.append(reward)
+    drs.append(float(reward))
     # record reward
 
     if done:
         episode_number += 1
+
+
         epx = np.vstack(xs)
         epdlogp = np.vstack(dlogps)
         epr = np.vstack(drs)
@@ -102,11 +124,13 @@ while True:
         discounted_epr -= np.mean(discounted_epr)
         discounted_epr /= np.std(discounted_epr)
 
+
         epdlogp *= discounted_epr
 
 
         if episode_number % batch_size == 0:
-            model.fit(epx, epdlogp, nb_epoch=1)
+            print epx.shape, epdlogp.shape
+            model.fit(epx, epdlogp, nb_epoch=1, verbose=2)
 
         # book-keeping
         running_reward = reward_sum if running_reward is None else running_reward * 0.99 + reward_sum * 0.01
@@ -115,6 +139,7 @@ while True:
         reward_sum = 0
         observation = env.reset()
         prev_x = None
+
 
     if reward != 0: # pong has either +1 or -1 reward exactly when game ends
         print ('ep %d: game finished, reward: %f' % (episode_number, reward)) + ('' if reward == -1 else ' !!!!!!!!')
